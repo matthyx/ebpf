@@ -75,6 +75,9 @@ func loadCachedKernelSpec() (*Spec, error) {
 		return nil, err
 	}
 
+	// Module specs were rebased against the old (now GC'd) kernel spec.
+	// Clear them so they are re-created against the new one.
+	globalCache.modules = make(map[string]weak.Pointer[Spec])
 	globalCache.kernel = weak.Make(spec)
 	return spec, nil
 }
