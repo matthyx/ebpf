@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"weak"
 
 	"github.com/cilium/ebpf/internal"
 	"github.com/cilium/ebpf/internal/linux"
@@ -17,12 +18,16 @@ import (
 )
 
 // globalCache amortises decoding BTF across all users of the library.
+//
+// Weak pointers allow the cached specs to be GC'd when no CollectionSpec
+// holds a reference to them, freeing kernel BTF memory (~20 MiB) after
+// all eBPF programs have been loaded.
 var globalCache = struct {
 	sync.RWMutex
-	kernel  *Spec
-	modules map[string]*Spec
+	kernel  weak.Pointer[Spec]
+	modules map[string]weak.Pointer[Spec]
 }{
-	modules: make(map[string]*Spec),
+	modules: make(map[string]weak.Pointer[Spec]),
 }
 
 // FlushKernelSpec removes any cached kernel type information.
@@ -30,8 +35,8 @@ func FlushKernelSpec() {
 	globalCache.Lock()
 	defer globalCache.Unlock()
 
-	globalCache.kernel = nil
-	globalCache.modules = make(map[string]*Spec)
+	globalCache.kernel = weak.Pointer[Spec]{}
+	globalCache.modules = make(map[string]weak.Pointer[Spec])
 }
 
 // LoadKernelSpec returns the current kernel's BTF information.
@@ -50,7 +55,7 @@ func LoadKernelSpec() (*Spec, error) {
 // Does not copy Spec.
 func loadCachedKernelSpec() (*Spec, error) {
 	globalCache.RLock()
-	spec := globalCache.kernel
+	spec := globalCache.kernel.Value()
 	globalCache.RUnlock()
 
 	if spec != nil {
@@ -61,8 +66,8 @@ func loadCachedKernelSpec() (*Spec, error) {
 	defer globalCache.Unlock()
 
 	// check again, to prevent race between multiple callers
-	if globalCache.kernel != nil {
-		return globalCache.kernel, nil
+	if spec := globalCache.kernel.Value(); spec != nil {
+		return spec, nil
 	}
 
 	spec, err := loadKernelSpec()
@@ -70,7 +75,7 @@ func loadCachedKernelSpec() (*Spec, error) {
 		return nil, err
 	}
 
-	globalCache.kernel = spec
+	globalCache.kernel = weak.Make(spec)
 	return spec, nil
 }
 
@@ -91,7 +96,7 @@ func LoadKernelModuleSpec(module string) (*Spec, error) {
 // Does not copy Spec.
 func loadCachedKernelModuleSpec(module string) (*Spec, error) {
 	globalCache.RLock()
-	spec := globalCache.modules[module]
+	spec := globalCache.modules[module].Value()
 	globalCache.RUnlock()
 
 	if spec != nil {
@@ -109,7 +114,7 @@ func loadCachedKernelModuleSpec(module string) (*Spec, error) {
 	defer globalCache.Unlock()
 
 	// check again, to prevent race between multiple callers
-	if spec := globalCache.modules[module]; spec != nil {
+	if spec := globalCache.modules[module].Value(); spec != nil {
 		return spec, nil
 	}
 
@@ -118,7 +123,7 @@ func loadCachedKernelModuleSpec(module string) (*Spec, error) {
 		return nil, err
 	}
 
-	globalCache.modules[module] = spec
+	globalCache.modules[module] = weak.Make(spec)
 	return spec, nil
 }
 
@@ -239,13 +244,18 @@ func NewCache() *Cache {
 
 	// This copy is either a no-op or very cheap, since the spec won't contain
 	// any inflated types.
-	kernel := globalCache.kernel.Copy()
-	if kernel == nil {
+	kernelSpec := globalCache.kernel.Value()
+	if kernelSpec == nil {
 		return &Cache{}
 	}
+	kernel := kernelSpec.Copy()
 
 	modules := make(map[string]*Spec, len(globalCache.modules))
-	for name, spec := range globalCache.modules {
+	for name, wp := range globalCache.modules {
+		spec := wp.Value()
+		if spec == nil {
+			continue
+		}
 		decoder, _ := rebaseDecoder(spec.decoder, kernel.decoder)
 		// NB: Kernel module BTF can't contain ELF fixups because it is always
 		// read from sysfs.
