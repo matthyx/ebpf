@@ -179,7 +179,21 @@ func rebaseDecoder(d *decoder, base *decoder) (*decoder, error) {
 		return nil, fmt.Errorf("rebase split spec: not a split spec")
 	}
 
-	if len(d.base.raw) != len(base.raw) || (len(d.base.raw) > 0 && &d.base.raw[0] != &base.raw[0]) {
+	if len(d.base.raw) != len(base.raw) {
+		return nil, fmt.Errorf("rebase split spec: raw BTF differs")
+	}
+
+	// Fast path: the common case is that base is the very same kernel spec
+	// the split spec was already rebased against, so pointer identity avoids
+	// a full content comparison.
+	//
+	// Slow path: the two kernel BTF byte slices came from independent loads
+	// (e.g. the weak-pointer-cached global kernel spec was reloaded between
+	// this Cache's Kernel() call and the module's Module() call, see
+	// armosec/private-node-agent#511). Identical content is always a valid
+	// rebase target regardless of which backing array it lives in, so fall
+	// back to a content comparison before rejecting the rebase.
+	if len(d.base.raw) > 0 && &d.base.raw[0] != &base.raw[0] && !bytes.Equal(d.base.raw, base.raw) {
 		return nil, fmt.Errorf("rebase split spec: raw BTF differs")
 	}
 
