@@ -471,8 +471,8 @@ func (pr *Reader) readRecordFromRing(rec *Record, ring *perfEventRing) error {
 
 	rec.CPU = ring.cpu
 	err := readRecord(ring, rec, pr.eventHeader, pr.overwritable)
-	// Ring readers return these io.* errors directly.
-	if pr.overwritable && (err == io.EOF || err == io.ErrUnexpectedEOF) {
+	// A sample may wrap EOF when the oldest record has been partially overwritten.
+	if pr.overwritable && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
 		return errEOR
 	}
 	rec.Remaining = ring.remaining()
