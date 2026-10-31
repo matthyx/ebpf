@@ -41,6 +41,10 @@ type KprobeOptions struct {
 	// The group name will be formatted as `<prefix>_<randomstr>`.
 	// The default empty string is equivalent to "ebpf" as the prefix.
 	TraceFSPrefix string
+	// ExactSymbol disables retrying with the platform's syscall prefix when
+	// the requested symbol cannot be attached. This prevents attaching to a
+	// different symbol; it does not disable the fallback from PMU to tracefs.
+	ExactSymbol bool
 }
 
 func (ko *KprobeOptions) cookie() uint64 {
@@ -48,6 +52,11 @@ func (ko *KprobeOptions) cookie() uint64 {
 		return 0
 	}
 	return ko.Cookie
+}
+
+func (ko *KprobeOptions) retryWithPrefix(err error) bool {
+	return (ko == nil || !ko.ExactSymbol) &&
+		(errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.EINVAL))
 }
 
 // SyscallWrapper returns the platform-specific kernel wrapper symbol for
@@ -76,7 +85,7 @@ func SyscallWrapper(syscall string) string {
 //
 // If attaching to symbol fails, automatically retries with the running
 // platform's syscall prefix (e.g. __x64_) to support attaching to syscalls
-// in a portable fashion.
+// in a portable fashion, unless [KprobeOptions.ExactSymbol] is set.
 //
 // On kernels 6.11 and later, setting a kprobe on a nonexistent symbol using
 // tracefs incorrectly returns [unix.EINVAL] instead of [os.ErrNotExist].
@@ -109,7 +118,7 @@ func Kprobe(symbol string, prog *ebpf.Program, opts *KprobeOptions) (Link, error
 //
 // If attaching to symbol fails, automatically retries with the running
 // platform's syscall prefix (e.g. __x64_) to support attaching to syscalls
-// in a portable fashion.
+// in a portable fashion, unless [KprobeOptions.ExactSymbol] is set.
 //
 // On kernels 5.10 and earlier, setting a kretprobe on a nonexistent symbol
 // incorrectly returns [unix.EINVAL] instead of [os.ErrNotExist].
@@ -189,7 +198,7 @@ func kprobe(symbol string, prog *ebpf.Program, opts *KprobeOptions, ret bool) (*
 
 	// Use kprobe PMU if the kernel has it available.
 	tp, err := pmuProbe(args)
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.EINVAL) {
+	if opts.retryWithPrefix(err) {
 		if prefix := linux.PlatformPrefix(); prefix != "" {
 			args.Symbol = prefix + symbol
 			tp, err = pmuProbe(args)
@@ -205,7 +214,7 @@ func kprobe(symbol string, prog *ebpf.Program, opts *KprobeOptions, ret bool) (*
 	// Use tracefs if kprobe PMU is missing.
 	args.Symbol = symbol
 	tp, err = tracefsProbe(args)
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.EINVAL) {
+	if opts.retryWithPrefix(err) {
 		if prefix := linux.PlatformPrefix(); prefix != "" {
 			args.Symbol = prefix + symbol
 			tp, err = tracefsProbe(args)
